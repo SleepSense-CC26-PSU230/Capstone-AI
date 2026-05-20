@@ -3,6 +3,4 @@ gunicorn==22.0.0
 tensorflow-cpu==2.15.0
 numpy==1.26.4
 python-dotenv==1.0.1
-langchain==0.2.16
-langchain-google-genai==1.0.10
-google-generativeai==0.7.2
+google-generativeai==0.8.5
