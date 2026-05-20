@@ -4,10 +4,10 @@ SleepSense Flask API
 Team CC26-PSU230 | Coding Camp 2026 DBS Foundation
 
 Endpoints:
-  POST /predict        -> Risk classification dari model TF
-  POST /chat           -> Gemini 2.0 Flash via Pure SDK (empathetic response)
-  POST /analyze        -> Predict + Chat dalam satu request
-  GET  /health         -> Health check
+  POST /predict  -> Risk classification dari model TF
+  POST /chat     -> Gemini Flash via LangChain
+  POST /analyze  -> Predict + Chat dalam satu request
+  GET  /health   -> Health check
 """
 
 import os
@@ -20,8 +20,9 @@ from tensorflow.keras import layers
 from flask import Flask, request, jsonify
 from dotenv import load_dotenv
 
-# Gunakan Google GenAI SDK murni, hapus LangChain total
-import google.generativeai as genai
+from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.output_parsers import StrOutputParser
 
 load_dotenv()
 logging.basicConfig(level=logging.INFO)
@@ -29,18 +30,14 @@ logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 
-# ─────────────────────────────────────────────
-# 1. PATHS
-# ─────────────────────────────────────────────
+# ─── PATHS ───────────────────────────────────────────────────
 BASE_DIR    = os.path.dirname(os.path.abspath(__file__))
 MODELS_DIR  = os.path.join(BASE_DIR, "..", "models")
 MODEL_PATH  = os.path.join(MODELS_DIR, "sleepsense_model.keras")
 SCALER_PATH = os.path.join(MODELS_DIR, "scaler_params.json")
 META_PATH   = os.path.join(MODELS_DIR, "feature_meta.json")
 
-# ─────────────────────────────────────────────
-# 2. CUSTOM TF COMPONENTS
-# ─────────────────────────────────────────────
+# ─── CUSTOM TF COMPONENTS ────────────────────────────────────
 class AttentionScaling(layers.Layer):
     def __init__(self, units, **kwargs):
         super().__init__(**kwargs)
@@ -76,13 +73,11 @@ class FocalLoss(keras.losses.Loss):
         return cfg
 
 
-# ─────────────────────────────────────────────
-# 3. LOAD MODEL & ARTIFACTS
-# ─────────────────────────────────────────────
+# ─── SINGLETON LOADER ────────────────────────────────────────
 _model         = None
 _scaler_params = None
 _meta          = None
-_llm_model     = None
+_llm_chain     = None
 
 
 def get_model():
@@ -112,65 +107,48 @@ def get_artifacts():
 
 
 def get_llm_chain():
-    """Menggunakan SDK murni bertindak sebagai 'chain wrapper'."""
-    global _llm_model
-    if _llm_model is None:
+    global _llm_chain
+    if _llm_chain is None:
         api_key = os.getenv("GEMINI_API_KEY")
         if not api_key:
-            raise ValueError("GEMINI_API_KEY tidak ditemukan di environment variable.")
+            raise ValueError("GEMINI_API_KEY tidak ditemukan di .env")
 
-        genai.configure(api_key=api_key)
-        
-        # Inisialisasi model stabil Gemini 2.0 Flash secara direct
-        raw_model = genai.GenerativeModel('gemini-2.0-flash')
+        llm = ChatGoogleGenerativeAI(
+            model="gemini-2.0-flash",
+            google_api_key=api_key,
+            temperature=0.7,
+        )
 
-        class PureGeminiChain:
-            def __init__(self, model):
-                self.model = model
-            
-            def invoke(self, inputs):
-                prompt = f"""Kamu adalah asisten kesehatan SleepSense yang empatik dan suportif.
-Tugasmu memberikan saran kesehatan terkait pola tidur, screen time, dan manajemen stres.
+        prompt = ChatPromptTemplate.from_messages([
+            ("system",
+             "Kamu adalah asisten kesehatan SleepSense yang empatik dan suportif. "
+             "Tugasmu memberikan saran terkait pola tidur, screen time, dan manajemen stres. "
+             "Selalu gunakan Bahasa Indonesia yang hangat. "
+             "Output adalah SCREENING AWAL, bukan diagnosis medis. "
+             "Berikan 2-3 saran konkret dan tutup dengan kalimat motivasi singkat."),
+            ("human",
+             "Data pengguna:\n"
+             "- Usia: {age} tahun, Jenis kelamin: {gender}\n"
+             "- Durasi tidur: {sleep_duration_hours} jam/malam\n"
+             "- Kualitas tidur: {sleep_quality_score}/10\n"
+             "- Screen time harian: {daily_screen_time_hours} jam\n"
+             "- Screen time sebelum tidur: {pre_sleep_screen_time_hours} jam\n"
+             "- Aktivitas fisik: {physical_activity_minutes} menit/hari\n"
+             "- Kafein: {caffeine_intake_cups} cangkir/hari\n"
+             "- Kelelahan mental: {mental_fatigue_score}/10\n"
+             "- Notifikasi/hari: {notifications_received_per_day}\n\n"
+             "Hasil screening: Risiko {risk_level} (probabilitas: {risk_probability})\n\n"
+             "Berikan respons empatik dan saran personal.")
+        ])
 
-PENTING:
-- Selalu gunakan bahasa Indonesia yang hangat dan mudah dipahami
-- Output adalah SCREENING AWAL, bukan diagnosis medis
-- Jangan pernah menyebut ini sebagai "diagnosis"
-- Berikan 2-3 saran konkret yang bisa langsung diterapkan
-- Tutup dengan kalimat motivasi singkat
-
-Data pengguna:
-- Usia: {inputs.get('age')} tahun
-- Jenis kelamin: {inputs.get('gender')}
-- Durasi tidur: {inputs.get('sleep_duration_hours')} jam/malam
-- Kualitas tidur: {inputs.get('sleep_quality_score')}/10
-- Screen time harian: {inputs.get('daily_screen_time_hours')} jam
-- Screen time sebelum tidur: {inputs.get('pre_sleep_screen_time_hours')} jam
-- Aktivitas fisik: {inputs.get('physical_activity_minutes')} menit/hari
-- Kafein: {inputs.get('caffeine_intake_cups')} cangkir/hari
-- Kelelahan mental: {inputs.get('mental_fatigue_score')}/10
-- Notifikasi per hari: {inputs.get('notifications_received_per_day')}
-
-Hasil screening model:
-- Tingkat risiko: {inputs.get('risk_level')}
-- Probabilitas risiko stres: {inputs.get('risk_probability')}
-
-Berikan respons empatik dan saran yang personal berdasarkan data di atas."""
-                
-                response = self.model.generate_content(prompt)
-                return response.text
-
-        _llm_model = PureGeminiChain(raw_model)
-        logger.info("Pure Google GenAI SDK initialized successfully.")
-    return _llm_model
+        _llm_chain = prompt | llm | StrOutputParser()
+        logger.info("LangChain + Gemini Flash chain ready.")
+    return _llm_chain
 
 
-# ─────────────────────────────────────────────
-# 4. PREPROCESSING
-# ─────────────────────────────────────────────
+# ─── PREPROCESSING ───────────────────────────────────────────
 def preprocess(data: dict) -> np.ndarray:
     scaler_params, meta = get_artifacts()
-
     age       = float(data.get("age", 25))
     age_label = "teen" if age <= 18 else ("young_adult" if age <= 35 else "adult")
 
@@ -216,9 +194,7 @@ def interpret(prob: float) -> dict:
     }
 
 
-# ─────────────────────────────────────────────
-# 5. ENDPOINTS
-# ─────────────────────────────────────────────
+# ─── ENDPOINTS ───────────────────────────────────────────────
 
 @app.route("/health", methods=["GET"])
 def health():
@@ -232,14 +208,32 @@ def health():
 
 @app.route("/predict", methods=["POST"])
 def predict():
+    """
+    Prediksi risiko stres dari TensorFlow model.
+
+    Request Body:
+    {
+        "age": 22, "gender": "Male",
+        "sleep_duration_hours": 5.5, "sleep_quality_score": 4.0,
+        "daily_screen_time_hours": 8.0, "pre_sleep_screen_time_hours": 2.5,
+        "physical_activity_minutes": 15, "caffeine_intake_cups": 4,
+        "mental_fatigue_score": 7.5, "notifications_received_per_day": 120
+    }
+
+    Response Body:
+    {
+        "risk_label": "At Risk", "risk_level": "Tinggi",
+        "risk_probability": 0.82, "summary": "...", "disclaimer": "..."
+    }
+    """
     try:
         data = request.get_json()
         if not data:
-            return jsonify({"error": "Request body JSON kosong atau tidak valid."}), 400
+            return jsonify({"error": "Request body tidak valid."}), 400
 
-        model = get_model()
-        x     = preprocess(data)
-        prob  = float(model(x, training=False).numpy().flatten()[0])
+        model  = get_model()
+        x      = preprocess(data)
+        prob   = float(model(x, training=False).numpy().flatten()[0])
         result = interpret(prob)
 
         logger.info(f"Predict: prob={prob:.4f} level={result['risk_level']}")
@@ -252,28 +246,32 @@ def predict():
 
 @app.route("/chat", methods=["POST"])
 def chat():
+    """
+    Respons empatik dari Gemini Flash via LangChain.
+
+    Request Body: sama seperti /predict + tambahkan risk_level dan risk_probability
+    """
     try:
         data = request.get_json()
         if not data:
-            return jsonify({"error": "Request body JSON kosong atau tidak valid."}), 400
+            return jsonify({"error": "Request body tidak valid."}), 400
 
         chain   = get_llm_chain()
         message = chain.invoke({
-            "age":                             data.get("age", 25),
-            "gender":                          data.get("gender", "Male"),
-            "sleep_duration_hours":            data.get("sleep_duration_hours", 7.0),
-            "sleep_quality_score":             data.get("sleep_quality_score", 5.0),
-            "daily_screen_time_hours":         data.get("daily_screen_time_hours", 4.0),
-            "pre_sleep_screen_time_hours":     data.get("pre_sleep_screen_time_hours", 1.0),
-            "physical_activity_minutes":       data.get("physical_activity_minutes", 30.0),
-            "caffeine_intake_cups":            data.get("caffeine_intake_cups", 2.0),
-            "mental_fatigue_score":            data.get("mental_fatigue_score", 5.0),
-            "notifications_received_per_day":  data.get("notifications_received_per_day", 50.0),
-            "risk_level":                      data.get("risk_level", "Sedang"),
-            "risk_probability":                data.get("risk_probability", 0.5),
+            "age":                            data.get("age", 25),
+            "gender":                         data.get("gender", "Male"),
+            "sleep_duration_hours":           data.get("sleep_duration_hours", 7.0),
+            "sleep_quality_score":            data.get("sleep_quality_score", 5.0),
+            "daily_screen_time_hours":        data.get("daily_screen_time_hours", 4.0),
+            "pre_sleep_screen_time_hours":    data.get("pre_sleep_screen_time_hours", 1.0),
+            "physical_activity_minutes":      data.get("physical_activity_minutes", 30.0),
+            "caffeine_intake_cups":           data.get("caffeine_intake_cups", 2.0),
+            "mental_fatigue_score":           data.get("mental_fatigue_score", 5.0),
+            "notifications_received_per_day": data.get("notifications_received_per_day", 50.0),
+            "risk_level":                     data.get("risk_level", "Sedang"),
+            "risk_probability":               data.get("risk_probability", 0.5),
         })
 
-        logger.info("Chat response generated.")
         return jsonify({"message": message}), 200
 
     except Exception as e:
@@ -283,32 +281,42 @@ def chat():
 
 @app.route("/analyze", methods=["POST"])
 def analyze():
+    """
+    Endpoint utama: Predict + Gemini Chat dalam satu request.
+
+    Request Body: sama seperti /predict
+    Response Body:
+    {
+        "prediction": { risk_label, risk_level, risk_probability, summary, disclaimer },
+        "advice": "Respons empatik dari Gemini..."
+    }
+    """
     try:
         data = request.get_json()
         if not data:
-            return jsonify({"error": "Request body JSON kosong atau tidak valid."}), 400
+            return jsonify({"error": "Request body tidak valid."}), 400
 
-        # Step 1: Model prediction
+        # Step 1: TF Model prediction
         model  = get_model()
         x      = preprocess(data)
         prob   = float(model(x, training=False).numpy().flatten()[0])
         result = interpret(prob)
 
-        # Step 2: Gemini advice
+        # Step 2: Gemini advice via LangChain
         chain   = get_llm_chain()
         message = chain.invoke({
-            "age":                             data.get("age", 25),
-            "gender":                          data.get("gender", "Male"),
-            "sleep_duration_hours":            data.get("sleep_duration_hours", 7.0),
-            "sleep_quality_score":             data.get("sleep_quality_score", 5.0),
-            "daily_screen_time_hours":         data.get("daily_screen_time_hours", 4.0),
-            "pre_sleep_screen_time_hours":     data.get("pre_sleep_screen_time_hours", 1.0),
-            "physical_activity_minutes":       data.get("physical_activity_minutes", 30.0),
-            "caffeine_intake_cups":            data.get("caffeine_intake_cups", 2.0),
-            "mental_fatigue_score":            data.get("mental_fatigue_score", 5.0),
-            "notifications_received_per_day":  data.get("notifications_received_per_day", 50.0),
-            "risk_level":                      result["risk_level"],
-            "risk_probability":                result["risk_probability"],
+            "age":                            data.get("age", 25),
+            "gender":                         data.get("gender", "Male"),
+            "sleep_duration_hours":           data.get("sleep_duration_hours", 7.0),
+            "sleep_quality_score":            data.get("sleep_quality_score", 5.0),
+            "daily_screen_time_hours":        data.get("daily_screen_time_hours", 4.0),
+            "pre_sleep_screen_time_hours":    data.get("pre_sleep_screen_time_hours", 1.0),
+            "physical_activity_minutes":      data.get("physical_activity_minutes", 30.0),
+            "caffeine_intake_cups":           data.get("caffeine_intake_cups", 2.0),
+            "mental_fatigue_score":           data.get("mental_fatigue_score", 5.0),
+            "notifications_received_per_day": data.get("notifications_received_per_day", 50.0),
+            "risk_level":                     result["risk_level"],
+            "risk_probability":               result["risk_probability"],
         })
 
         logger.info(f"Analyze: prob={prob:.4f} level={result['risk_level']}")
