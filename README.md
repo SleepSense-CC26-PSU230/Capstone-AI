@@ -18,6 +18,7 @@ sleepsense_flask/
 │   └── feature_meta.json         ← Feature metadata
 ├── notebooks/
 │   └── SleepSense_Training.ipynb ← Training di Google Colab
+│   └── predict_collab.ipnyb 
 ├── Dockerfile
 ├── docker-compose.yml
 ├── requirements.txt
